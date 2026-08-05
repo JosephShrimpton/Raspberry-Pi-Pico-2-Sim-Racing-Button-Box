@@ -1,6 +1,6 @@
 # Sim Racing Button Box — Complete Master Build Guide
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** August 2026  
 **Hardware:** Raspberry Pi Pico 2 + Freenove Terminal Breakout  
 **Enclosure:** 12mm MDF (custom-cut) with aluminium faceplate  
