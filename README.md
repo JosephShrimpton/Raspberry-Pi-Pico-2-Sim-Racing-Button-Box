@@ -1,6 +1,6 @@
 # Sim Racing Button Box — Complete Master Build Guide
 
-**Version:** 1.1  
+**Version:** 1.0  
 **Date:** August 2026  
 **Hardware:** Raspberry Pi Pico 2 + Freenove Terminal Breakout  
 **Enclosure:** 12mm MDF (custom-cut) with aluminium faceplate  
@@ -1230,15 +1230,59 @@ var llt = toSeconds(lastLapTime);
 var blt = toSeconds(bestLapTime);
 var lpd = toSeconds(lastPitStopDuration);
 
-// --- Session reset: if lap counter went backwards, new race started ---
+// --- Line crossing detection for BOX BOX and FUEL OKAY ---
+if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
+    // Calculate exact fuel needed to finish from this point
+    var fuelNeededToFinish = 0;
+    if (remainingLaps > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(remainingLaps)) {
+        fuelNeededToFinish = remainingLaps * fuelPerLap;
+    } else {
+        var lapTime = llt > 0 ? llt : blt;
+        if (lapTime > 0 && stl > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(stl) && isFinite(lapTime)) {
+            fuelNeededToFinish = (stl / lapTime) * fuelPerLap;
+        }
+    }
+
+    // Detect penultimate lap for end-of-race FUEL OKAY / BOX BOX decision
+    var isPenultimateLap = false;
+    if (remainingLaps > 0) {
+        if (remainingLaps == 2) isPenultimateLap = true;
+    } else {
+        var lapTime = llt > 0 ? llt : blt;
+        if (lapTime > 0 && stl > 0) {
+            var estLapsRemaining = stl / lapTime;
+            if (estLapsRemaining > 1 && estLapsRemaining <= 2) isPenultimateLap = true;
+        }
+    }
+
+    if (isPenultimateLap && fuelNeededToFinish > 0 && isFinite(fuel)) {
+        if (fuel >= fuelNeededToFinish) {
+            fuelOkayActive = true;
+            boxBoxActive = false;
+        } else {
+            boxBoxActive = true;
+            fuelOkayActive = false;
+        }
+    }
+
+    // Early warning BOX BOX: will run out of fuel within 2 laps
+    if (!fuelOkayActive && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel) && fuel < 2 * fuelPerLap) {
+        boxBoxActive = true;
+    }
+}
+
+// Session reset: if lap counter went backwards, new race started
 if (lastCurrentLap > 0 && currentLap < lastCurrentLap) {
     pitsCompleted = 0;
+    boxBoxActive = false;
+    fuelOkayActive = false;
 }
 lastCurrentLap = currentLap;
 
 // ============================================================
 //  LINE 1 — Position / Class Position / Lap
 //  Detects multiclass by scanning leaderboard CarClass strings.
+//  EDITED: Multiclass now omits lap count.
 // ============================================================
 var playerClass = $prop('DataCorePlugin.GameData.CarClass');
 var isMulticlass = false;
@@ -1264,7 +1308,8 @@ if (isMulticlass) {
         if (checkClass === null || checkClass === undefined || checkClass === '') continue;
         if (checkClass === playerClass) classPos++;
     }
-    line1 = 'P' + position + ' C' + classPos + ' L' + currentLap;
+    // EDITED: Removed ' L' + currentLap from multiclass line
+    line1 = 'P' + position + ' C' + classPos;
 } else {
     line1 = 'P' + position + ' L' + currentLap;
 }
@@ -1413,11 +1458,23 @@ if (isInPit) {
 }
 
 // ============================================================
-//  LINE 3 — Pit laps remaining before fuel runs out
+//  LINE 3 — Pit laps remaining, BOX BOX, or FUEL OKAY
 // ============================================================
-var pitLaps = 0;
-if (fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel)) {
-    pitLaps = Math.round(fuel / fuelPerLap);
+if (isInPit) {
+    boxBoxActive = false;
+}
+
+var line3 = '';
+if (fuelOkayActive) {
+    line3 = 'FUEL OKAY';
+} else if (boxBoxActive) {
+    line3 = 'BOX BOX';
+} else {
+    var pitLaps = 0;
+    if (fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel)) {
+        pitLaps = Math.round(fuel / fuelPerLap);
+    }
+    line3 = 'Pit ' + pitLaps;
 }
 
 // ============================================================
@@ -1426,7 +1483,7 @@ if (fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel)) {
 // ============================================================
 return 'DISP|' + line1 +
        '|F' + format(fuel, '0.0') + ' ' + fuelLabel + fuelDisplay +
-       '|Pit ' + pitLaps +
+       '|' + line3 +
        '|' + line4 + '\n';
 ```
 
