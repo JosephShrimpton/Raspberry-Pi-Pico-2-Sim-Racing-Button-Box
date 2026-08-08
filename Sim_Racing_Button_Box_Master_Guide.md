@@ -1047,9 +1047,15 @@ SimHub is the bridge between your racing game and the button box. It reads live 
 3. **Set the baud rate to 115200** (must match the `Serial.begin(115200)` in the Arduino code)
 4. **Set the refresh rate to 60Hz** for the OLED display code
 
+---
+
 ### 7.2 LED Control — NCALC Formulas
 
 SimHub uses **NCALC** formulas to decide when each LED should turn on, off, or flash. Each formula outputs a text command that the Pico 2 understands. **Set all LED rows to "Changes Only"** in SimHub to prevent spamming the serial port with identical commands.
+
+> **Why "Changes Only" is mandatory:** The Arduino firmware handles LED flashing and fading internally. If SimHub sends the same `_FLASH_` command at 60Hz, the Arduino resets its animation timer every frame and the LED appears frozen or stuttering. "Changes Only" ensures the command is sent once when the state changes, then the Pico runs the animation smoothly by itself.
+
+Each LED is controlled by **exactly one NCALC row**. There are no overlapping conditions per LED, which prevents one trigger from "knocking out" another.
 
 #### LED1 — Red: Low Fuel Warning
 
@@ -1064,14 +1070,14 @@ IF([ATSRHubMain.Telemetry.Vehicle.FuelLevel] / [DataCorePlugin.Computed.Fuel_Lit
 
 #### LED2 — Green: Tyre Wear Warning
 
-Flashes smoothly when tyre wear drops below 40% remaining.
+Flashes smoothly when any individual tyre drops below 70% remaining wear.
 
 ```
 NCALC Formula:
-IF([DataCorePlugin.GameData.TyresWearMin] < 40, 'LED2_FADE_FLASH_100', 'LED2_OFF') + '\n'
+IF([DataCorePlugin.GameData.TyreWearFrontLeft] < 70 || [DataCorePlugin.GameData.TyreWearFrontRight] < 70 || [DataCorePlugin.GameData.TyreWearRearLeft] < 70 || [DataCorePlugin.GameData.TyreWearRearRight] < 70, 'LED2_FADE_FLASH_100', 'LED2_OFF') + '\n'
 ```
 
-**What it does:** Reads the minimum tyre wear across all four tyres. If below 40%, sends `LED2_FADE_FLASH_100`. Otherwise off.
+**What it does:** Checks all four tyre wear values individually. If any corner drops below 70%, the green LED breathes. Using individual corner properties instead of `TyresWearMin` provides more accurate readouts in AMS2.
 
 #### LED3 — Blue: Blue Flag Warning
 
@@ -1082,8 +1088,6 @@ NCALC Formula:
 IF([DataCorePlugin.GameData.Flag_Blue], 'LED3_FADE_FLASH_100', 'LED3_OFF') + '\n'
 ```
 
-**What it does:** Checks if the blue flag boolean is true. If so, flashes LED3.
-
 #### LED4 — Yellow: Yellow Flag Warning
 
 Flashes smoothly when a yellow flag is shown.
@@ -1093,22 +1097,7 @@ NCALC Formula:
 IF([DataCorePlugin.GameData.Flag_Yellow], 'LED4_FADE_FLASH_100', 'LED4_OFF') + '\n'
 ```
 
-**What it does:** Checks if the yellow flag boolean is true. If so, flashes LED4.
-
-#### Best Lap Celebration — All 4 LEDs Chase Sequence
-
-When you set a new best lap, all 4 LEDs light up in a chasing sequence with staggered timing.
-
-**Create 4 separate NCALC rows** (one per LED):
-
-```
-LED1: IF(changed(2000, [DataCorePlugin.GameData.BestLapTime]), 'LED1_ON', 'LED1_OFF') + '\n'
-LED2: IF(changed(1700, [DataCorePlugin.GameData.BestLapTime]), 'LED2_ON', 'LED2_OFF') + '\n'
-LED3: IF(changed(1400, [DataCorePlugin.GameData.BestLapTime]), 'LED3_ON', 'LED3_OFF') + '\n'
-LED4: IF(changed(1100, [DataCorePlugin.GameData.BestLapTime]), 'LED4_ON', 'LED4_OFF') + '\n'
-```
-
-**What it does:** The `changed()` function detects when the best lap time value updates. The different millisecond values (2000, 1700, 1400, 1100) create a staggered delay so the LEDs light up in sequence: red → green → blue → yellow. Each LED stays on for the duration of the `changed()` window, creating a chase effect.
+---
 
 ### 7.3 OLED Display — JavaScript Code
 
@@ -1141,6 +1130,11 @@ var rrTimer = 0;
 var cycleStart = 0;
 var pitsCompleted = 0;
 var lastCurrentLap = 0;
+var boxBoxActive = false;
+var fuelOkayActive = false;
+var lastSessionType = '';
+var gapTimer = 0;
+var gapDisplayStr = '';
 ```
 
 #### Loop Code (Runs Every Frame)
@@ -1160,16 +1154,29 @@ Paste this into the "Loop" or main JavaScript section:
   It auto-detects race type (laps vs timed) and class structure
   (single vs multiclass) to show relevant data without manual switching.
 
-  LINE 1 — Position info:
-    - Single-class:  P[Position] L[Lap]
-    - Multiclass:    P[Position] C[ClassPos] L[Lap]
+  KEY FEATURES:
+  - Session-aware reset: pit counters and timers wipe when moving
+    from Practice -> Qualifying -> Race.
+  - Simplified fuel calculation: timer/lap-based with a flat +1 lap
+    buffer for timed races.
+  - Real-time gap snapshot: on every lap crossing, Line 1 shows a
+    10-second freeze of class-relative gaps using IntervalGap data.
+  - Multiclass support: class position, class-relative gaps, and
+    lap count omitted from Line 1 in multiclass races.
+
+  LINE 1 — Position info / Gap snapshot:
+    - 10s after crossing line: +[ahead] -[behind] (class-relative)
+    - Multiclass: P[Position] C[ClassPos]
+    - Single-class: P[Position] L[Lap]
 
   LINE 2 — Fuel info (rotates every 10 seconds):
     - Slot 0 (0-10s):  F[Fuel] E[Litres to add at next pit stop]
     - Slot 1 (10-20s): F[Fuel] T[Total litres needed to finish race]
 
-  LINE 3 — Pit window:
-    - Pit [laps remaining before fuel runs out]
+  LINE 3 — Pit window / BOX BOX / FUEL OKAY:
+    - Default:         Pit [laps remaining before fuel runs out]
+    - BOX BOX:         Triggered when fuel < 2 laps at line crossing
+    - FUEL OKAY:       Triggered at penultimate lap if fuel sufficient
 
   LINE 4 — Status / overrides (rotates every 10 seconds):
     - Priority overrides: live pit timer, frozen pit exit time,
@@ -1182,13 +1189,17 @@ Paste this into the "Loop" or main JavaScript section:
   ============================================================
 */
 
-// --- Helper: Convert SimHub TimeSpan objects or strings to plain seconds ---
+// --- Helper: Convert SimHub TimeSpan objects, decimal strings, or numbers to seconds ---
 function toSeconds(v) {
     if (typeof v === 'number') return v;
     if (v && typeof v.TotalSeconds === 'number') return v.TotalSeconds;
-    if (typeof v === 'string' && v.indexOf(':') > -1) {
-        var p = v.split(':');
-        return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseFloat(p[2]);
+    if (typeof v === 'string') {
+        if (v.indexOf(':') > -1) {
+            var p = v.split(':');
+            return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseFloat(p[2]);
+        }
+        var parsed = parseFloat(v);
+        if (!isNaN(parsed)) return parsed;
     }
     return 0;
 }
@@ -1205,6 +1216,36 @@ function fmtPit(sec) {
 var now = Date.now();
 if (cycleStart === 0) cycleStart = now;
 var elapsed = now - cycleStart;
+
+// --- Detect session change (Practice -> Qualifying -> Race, etc.) ---
+var sessionType = $prop('DataCorePlugin.GameData.SessionTypeName');
+
+if (sessionType && sessionType !== '' && sessionType !== lastSessionType) {
+    // Hard reset of all session-persistent state. This prevents
+    // pit stops from Practice/Qualifying from counting in the Race.
+    pitsCompleted = 0;
+    boxBoxActive = false;
+    fuelOkayActive = false;
+    cycleStart = now;
+    lastCurrentLap = 0;
+    lastTyreFL = null;
+    lastTyreFR = null;
+    lastTyreRL = null;
+    lastTyreRR = null;
+    flTimer = 0;
+    frTimer = 0;
+    rlTimer = 0;
+    rrTimer = 0;
+    lastBestLap = null;
+    bestLapTimer = 0;
+    pitTimer = 0;
+    gapTimer = 0;
+    gapDisplayStr = '';
+    // Sync pit duration tracker to current value so we don't count
+    // a stale pit stop from a previous session as a new race pit.
+    lastPitDur = $prop('DataCorePlugin.GameData.LastPitStopDuration');
+}
+lastSessionType = sessionType;
 
 // --- Pull all SimHub properties ---
 var remainingLaps = $prop('DataCorePlugin.GameData.RemainingLaps');
@@ -1230,27 +1271,33 @@ var llt = toSeconds(lastLapTime);
 var blt = toSeconds(bestLapTime);
 var lpd = toSeconds(lastPitStopDuration);
 
-// --- Line crossing detection for BOX BOX and FUEL OKAY ---
-if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
-    // Calculate exact fuel needed to finish from this point
-    var fuelNeededToFinish = 0;
+// --- Helper: calculate total fuel needed from this exact moment ---
+function calcTotalFuelNeeded(playerLapTime) {
     if (remainingLaps > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(remainingLaps)) {
-        fuelNeededToFinish = remainingLaps * fuelPerLap;
-    } else {
-        var lapTime = llt > 0 ? llt : blt;
-        if (lapTime > 0 && stl > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(stl) && isFinite(lapTime)) {
-            fuelNeededToFinish = (stl / lapTime) * fuelPerLap;
-        }
+        // Lap race: exact laps remaining
+        return Math.ceil(remainingLaps * fuelPerLap);
+    } else if (playerLapTime > 0 && stl > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(stl) && isFinite(playerLapTime)) {
+        // Timed race: base laps from remaining time + 1 lap buffer.
+        // The +1 lap accounts for the leader finishing their current lap
+        // after the chequered flag/timer expires.
+        var lapsRemaining = (stl / playerLapTime) + 1;
+        return Math.ceil(lapsRemaining * fuelPerLap);
     }
+    return 0;
+}
+
+// --- Line crossing detection for BOX BOX, FUEL OKAY, and gap snapshot ---
+if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
+    var playerLapTime = llt > 0 ? llt : blt;
+    var fuelNeededToFinish = calcTotalFuelNeeded(playerLapTime);
 
     // Detect penultimate lap for end-of-race FUEL OKAY / BOX BOX decision
     var isPenultimateLap = false;
     if (remainingLaps > 0) {
         if (remainingLaps == 2) isPenultimateLap = true;
     } else {
-        var lapTime = llt > 0 ? llt : blt;
-        if (lapTime > 0 && stl > 0) {
-            var estLapsRemaining = stl / lapTime;
+        if (playerLapTime > 0 && stl > 0) {
+            var estLapsRemaining = (stl / playerLapTime) + 1;
             if (estLapsRemaining > 1 && estLapsRemaining <= 2) isPenultimateLap = true;
         }
     }
@@ -1269,9 +1316,84 @@ if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
     if (!fuelOkayActive && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel) && fuel < 2 * fuelPerLap) {
         boxBoxActive = true;
     }
+
+    // ============================================================
+    //  GAP SNAPSHOT on lap crossing (10-second freeze)
+    //  Uses IntervalGap (real-time) for direct car-to-car deltas.
+    //  In multiclass, sums the intervals between you and the nearest
+    //  class neighbor to give true class-relative gaps.
+    // ============================================================
+    var playerPos = parseInt(position);
+    var pClass = $prop('DataCorePlugin.GameData.CarClass');
+
+    var aheadGap = 0;
+    var foundAhead = false;
+    // Sum IntervalGap values walking up from your position until we
+    // hit a car in the same class. Each IntervalGap is the gap from
+    // that position to the car immediately ahead of it overall.
+    for (var i = playerPos; i > 1; i--) {
+        var idx = i < 10 ? '0' + i : '' + i;
+        var intervalRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.IntervalGap');
+        if (intervalRaw !== null && intervalRaw !== undefined && intervalRaw !== '') {
+            aheadGap += toSeconds(intervalRaw);
+        }
+
+        var checkPos = i - 1;
+        var checkIdx = checkPos < 10 ? '0' + checkPos : '' + checkPos;
+        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + checkIdx + '.CarClass');
+        if (checkClass === pClass) {
+            foundAhead = true;
+            break;
+        }
+    }
+
+    var behindGap = 0;
+    var foundBehind = false;
+    // Sum IntervalGap values walking down from your position until we
+    // hit a car in the same class.
+    for (var i = playerPos + 1; i <= 100; i++) {
+        var idx = i < 10 ? '0' + i : '' + i;
+        var intervalRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.IntervalGap');
+        if (intervalRaw !== null && intervalRaw !== undefined && intervalRaw !== '') {
+            behindGap += toSeconds(intervalRaw);
+        }
+
+        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        if (checkClass === pClass) {
+            foundBehind = true;
+            break;
+        }
+    }
+
+    var lapTime = playerLapTime;
+    var aheadStr = '';
+    var behindStr = '';
+
+    if (foundAhead) {
+        if (lapTime > 0 && aheadGap >= lapTime) {
+            aheadStr = '+' + Math.floor(aheadGap / lapTime) + 'L';
+        } else {
+            aheadStr = '+' + aheadGap.toFixed(1);
+        }
+    } else {
+        aheadStr = '+LEAD';
+    }
+
+    if (foundBehind) {
+        if (lapTime > 0 && behindGap >= lapTime) {
+            behindStr = '-' + Math.floor(behindGap / lapTime) + 'L';
+        } else {
+            behindStr = '-' + behindGap.toFixed(1);
+        }
+    } else {
+        behindStr = '-LAST';
+    }
+
+    gapDisplayStr = aheadStr + ' ' + behindStr;
+    gapTimer = now + 10000;
 }
 
-// Session reset: if lap counter went backwards, new race started
+// Session reset: lap counter went backwards (catches same-session restarts)
 if (lastCurrentLap > 0 && currentLap < lastCurrentLap) {
     pitsCompleted = 0;
     boxBoxActive = false;
@@ -1280,9 +1402,7 @@ if (lastCurrentLap > 0 && currentLap < lastCurrentLap) {
 lastCurrentLap = currentLap;
 
 // ============================================================
-//  LINE 1 — Position / Class Position / Lap
-//  Detects multiclass by scanning leaderboard CarClass strings.
-//  EDITED: Multiclass now omits lap count.
+//  LINE 1 — Gap snapshot / Position / Class Position / Lap
 // ============================================================
 var playerClass = $prop('DataCorePlugin.GameData.CarClass');
 var isMulticlass = false;
@@ -1299,7 +1419,10 @@ if (playerClass && playerClass !== '') {
 }
 
 var line1 = '';
-if (isMulticlass) {
+if (now < gapTimer && gapDisplayStr !== '') {
+    // Gap snapshot active for 10 seconds after crossing the line
+    line1 = gapDisplayStr;
+} else if (isMulticlass) {
     var classPos = 1;
     var maxCheck = Math.min(position, 70);
     for (var i = 1; i < maxCheck; i++) {
@@ -1308,7 +1431,6 @@ if (isMulticlass) {
         if (checkClass === null || checkClass === undefined || checkClass === '') continue;
         if (checkClass === playerClass) classPos++;
     }
-    // EDITED: Removed ' L' + currentLap from multiclass line
     line1 = 'P' + position + ' C' + classPos;
 } else {
     line1 = 'P' + position + ' L' + currentLap;
@@ -1316,18 +1438,10 @@ if (isMulticlass) {
 
 // ============================================================
 //  TOTAL FUEL NEEDED TO FINISH
-//  Lap race:  RemainingLaps × FuelPerLap
-//  Time race: (SessionTimeLeft ÷ LastLapTime) × FuelPerLap
+//  Simplified: timer/lap based + flat +1 lap buffer
 // ============================================================
-var totalFuelNeeded = 0;
-if (remainingLaps > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(remainingLaps)) {
-    totalFuelNeeded = Math.ceil(remainingLaps * fuelPerLap);
-} else {
-    var lapTime = llt > 0 ? llt : blt;
-    if (lapTime > 0 && stl > 0 && fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(stl) && isFinite(lapTime)) {
-        totalFuelNeeded = Math.ceil((stl / lapTime) * fuelPerLap);
-    }
-}
+var playerLapTime = llt > 0 ? llt : blt;
+var totalFuelNeeded = calcTotalFuelNeeded(playerLapTime);
 
 // ============================================================
 //  LINE 2 — Fuel to add at next pit stop (capped by tank size)
@@ -1361,7 +1475,7 @@ if (fuelSlot === 1 && totalFuelNeeded > 0 && isFinite(totalFuelNeeded)) {
 //  These timers create timed flashes when values change:
 //  - Best Lap:  4 seconds
 //  - Pit stop:  4 seconds (increments pitsCompleted counter)
-//  - Tyre wear: 15 seconds per corner (only if wear < 40%)
+//  - Tyre wear: 15 seconds per corner (only if wear < 70%)
 // ============================================================
 if (bestLapTime !== lastBestLap && blt > 0) {
     bestLapTimer = now + 4000;
@@ -1374,16 +1488,16 @@ if (lastPitStopDuration !== lastPitDur && lpd > 0) {
 }
 lastPitDur = lastPitStopDuration;
 
-if (tyreFL !== lastTyreFL && tyreFL < 40) { flTimer = now + 15000; }
+if (tyreFL !== lastTyreFL && tyreFL < 70) { flTimer = now + 15000; }
 lastTyreFL = tyreFL;
 
-if (tyreFR !== lastTyreFR && tyreFR < 40) { frTimer = now + 15000; }
+if (tyreFR !== lastTyreFR && tyreFR < 70) { frTimer = now + 15000; }
 lastTyreFR = tyreFR;
 
-if (tyreRL !== lastTyreRL && tyreRL < 40) { rlTimer = now + 15000; }
+if (tyreRL !== lastTyreRL && tyreRL < 70) { rlTimer = now + 15000; }
 lastTyreRL = tyreRL;
 
-if (tyreRR !== lastTyreRR && tyreRR < 40) { rrTimer = now + 15000; }
+if (tyreRR !== lastTyreRR && tyreRR < 70) { rrTimer = now + 15000; }
 lastTyreRR = tyreRR;
 
 // ============================================================
@@ -1487,18 +1601,26 @@ return 'DISP|' + line1 +
        '|' + line4 + '\n';
 ```
 
+---
+
 ### 7.4 What the Display Shows
 
 | Line | Content | Example |
 |------|---------|---------|
-| **Line 1** | Position, Class Position (multiclass), Lap | `P3 C1 L12` or `P3 L12` |
+| **Line 1** | **Gap snapshot** (10s after line crossing): class-relative time to car ahead and behind | `+1.5 -2.3` |
+| **Line 1** | **Multiclass fallback:** Position, Class Position | `P39 C5` |
+| **Line 1** | **Single-class fallback:** Position, Lap | `P39 L12` |
 | **Line 2** | Fuel amount + fuel to add OR total needed | `F12.5 E8` or `F12.5 T45` |
-| **Line 3** | Laps until pit needed | `Pit 4` |
+| **Line 3** | Laps until pit needed / BOX BOX / FUEL OKAY | `Pit 4`, `BOX BOX`, `FUEL OKAY` |
 | **Line 4** | Status: pit timer, best lap, tyre wear, laps/time, pit stops | `BEST LAP`, `FRONT LEFT`, `L12/25`, `PIT 1/2` |
 
 **Line 2 and Line 4 rotate every 10 seconds** between two information slots, so you see both fuel-to-add and total-fuel-needed, and both lap-counter and pit-stop-progress, without cluttering the screen.
 
-**Priority overrides on Line 4:** If you're in the pits, it shows the live pit timer. If you just finished a pit stop, it shows the duration for 4 seconds. If you set a best lap, it shows `BEST LAP` for 4 seconds. If tyre wear drops below 40% on any corner, it shows that corner's name for 15 seconds. Only if none of these are active does it show the rotating lap/time info.
+**Gap snapshot details:** When you cross the start/finish line, Line 1 freezes a 10-second readout of your class-relative gaps. It uses `IntervalGap` from the GarySwallowDataPlugin — the real-time gap from each car to the one immediately ahead. To find your class neighbors, the script sums the intervals between you and the nearest matching-class car in each direction. If the gap exceeds one lap length, it displays `+1L` or `-1L`. If you are first or last in class, it shows `+LEAD` or `-LAST`.
+
+**Priority overrides on Line 4:** If you're in the pits, it shows the live pit timer. If you just finished a pit stop, it shows the duration for 4 seconds. If you set a best lap, it shows `BEST LAP` for 4 seconds. If tyre wear drops below 70% on any corner, it shows that corner's name for 15 seconds. Only if none of these are active does it show the rotating lap/time info.
+
+---
 
 ### 7.5 SimHub Settings Summary
 
