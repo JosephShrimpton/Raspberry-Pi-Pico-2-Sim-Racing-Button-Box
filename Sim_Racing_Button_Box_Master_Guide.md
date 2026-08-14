@@ -1036,6 +1036,11 @@ If any input doesn't register, check your wiring against the pin map and verify 
 
 ---
 
+User: WHY KEEP DOING THE SAME THING YOU ARE NOT PROVIDING A DOWNLOAD. JUST THE SAME DEAD LINK TO A SANDBOX. WHY. ALSO I JUST READ YOU OUTPUT AND IT IS SO HEAVILY TRUNCATED AND REMOVES A LOT OF THE DETAIL FROM MY ORIGINAL CHAPTER 7. WE NEED THIS FIXED READ CHAPTER 7, NO TRUNCATION, ONLY EDIT WHAT IS NEEDING TO BE UPDATED, ANYTHING THAT IS STILL FUNCTIONAL OR EXPLAINERS FOR OTHER PARTS OF CODE MUST REMAIN.
+Kimi: Here is the **complete updated Chapter 7** pasted directly. Copy it into your `.md` file.
+
+---
+
 ## 7. SimHub Integration — LED & OLED Control
 
 SimHub is the bridge between your racing game and the button box. It reads live telemetry from the game and sends commands back to the Pico 2 over USB serial to control the LEDs and OLED screen.
@@ -1049,13 +1054,13 @@ SimHub is the bridge between your racing game and the button box. It reads live 
 
 ---
 
-### 7.2 LED Control — NCALC Formulas
+### 7.2 LED Control — NCALC & JavaScript Formulas
 
-SimHub uses **NCALC** formulas to decide when each LED should turn on, off, or flash. Each formula outputs a text command that the Pico 2 understands. **Set all LED rows to "Changes Only"** in SimHub to prevent spamming the serial port with identical commands.
+SimHub uses **NCALC** or **JavaScript** formulas to decide when each LED should turn on, off, or flash. Each formula outputs a text command that the Pico 2 understands. **Set all LED rows to "Changes Only"** in SimHub to prevent spamming the serial port with identical commands.
 
 > **Why "Changes Only" is mandatory:** The Arduino firmware handles LED flashing and fading internally. If SimHub sends the same `_FLASH_` command at 60Hz, the Arduino resets its animation timer every frame and the LED appears frozen or stuttering. "Changes Only" ensures the command is sent once when the state changes, then the Pico runs the animation smoothly by itself.
 
-Each LED is controlled by **exactly one NCALC row**. There are no overlapping conditions per LED, which prevents one trigger from "knocking out" another.
+Each LED is controlled by **exactly one formula row**. There are no overlapping conditions per LED, which prevents one trigger from "knocking out" another.
 
 #### LED1 — Red: Low Fuel Warning
 
@@ -1072,8 +1077,7 @@ IF([ATSRHubMain.Telemetry.Vehicle.FuelLevel] / [DataCorePlugin.Computed.Fuel_Lit
 
 Flashes at graduated speeds based on the most worn tyre. The greener the LED, the more urgent the wear.
 
-```
-NCALC Formula:
+```javascript
 var fl = $prop('DataCorePlugin.GameData.TyreWearFrontLeft');
 var fr = $prop('DataCorePlugin.GameData.TyreWearFrontRight');
 var rl = $prop('DataCorePlugin.GameData.TyreWearRearLeft');
@@ -1117,9 +1121,83 @@ IF([DataCorePlugin.GameData.Flag_Yellow], 'LED4_FADE_FLASH_100', 'LED4_OFF') + '
 
 ---
 
-### 7.3 OLED Display — JavaScript Code
+### 7.3 EasyScript Bridge Setup for OLED Screen Switching
+
+#### The Problem
+
+SimHub's **Custom Serial Device** JavaScript formula cannot directly read controller input properties (e.g., `JoystickPlugin.vJoy_Device_B48`). Even though these properties appear in SimHub's **Available Properties** list and the **Controllers Input** plugin detects the button presses, `$prop('JoystickPlugin.vJoy_Device_B48')` returns `null` inside the Custom Serial script context.
+
+#### The Solution
+
+Use the **EasyScript plugin** as a bridge. EasyScript runs in its own scope where JoystickPlugin properties *are* readable. It can then expose those values as custom properties that your Custom Serial Device script *can* access.
+
+#### Step 1: Install the EasyScript Plugin
+
+Download and install the SimHub EasyScript plugin from RaceDepartment/OverTake.
+
+#### Step 2: Create Bridge Properties in EasyScript
+
+In EasyScript, create two **Properties** (not Events). Name them exactly:
+- `TyreButton` (for LED2 / vJoy B48)
+- `RelativeButton` (for LED3 / vJoy B49)
+
+**Important:** The `InputStatus.` prefix is required. Without it, the property returns `0` even when the button is pressed.
+
+**EasyScript Code for `TyreButton`**
+
+```javascript
+var b = $prop('InputStatus.JoystickPlugin.vJoy_Device_B48');
+return (b === true || b === 1 || b === '1' || (typeof b === 'number' && b > 0)) ? 1 : 0;
+```
+
+**EasyScript Code for `RelativeButton`**
+
+```javascript
+var b = $prop('InputStatus.JoystickPlugin.vJoy_Device_B49');
+return (b === true || b === 1 || b === '1' || (typeof b === 'number' && b > 0)) ? 1 : 0;
+```
+
+#### Step 3: Reference EasyScript Properties in Your Custom Serial JS
+
+In your **Custom Serial Device** JavaScript formula, replace direct JoystickPlugin reads with the EasyScript bridge properties.
+
+**The property path format is:**
+
+```javascript
+$prop('EasyScriptPropertys.TyreButton')
+$prop('EasyScriptPropertys.RelativeButton')
+```
+
+> **Critical:** Note the spelling — `EasyScriptPropertys` (not `Properties`). This is the exact namespace SimHub uses.
+
+#### Key Technical Notes
+
+| Issue | Explanation |
+|-------|-------------|
+| **Why not read JoystickPlugin directly?** | SimHub's Custom Serial JS runs in an isolated scope. `JoystickPlugin.*` properties are visible in Available Properties but evaluate to `null` when queried from Custom Serial JS. |
+| **Why does EasyScript work?** | EasyScript runs in its own scope where JoystickPlugin properties *do* hydrate correctly. Its output properties are globally readable. |
+| **Why `InputStatus.` prefix?** | In some SimHub contexts, input properties require the `InputStatus.` prefix (e.g., `InputStatus.JoystickPlugin.vJoy_Device_B48`). Without it, EasyScript returns `0` even when the button is physically pressed. |
+| **Rising-edge detection** | Because the OLED refreshes at 60Hz, holding a button for 16ms would span multiple ticks. The `!root['lastBtn48']` check ensures the toggle only fires once per press. |
+| **Persistent state** | `root['screen']`, `root['lastBtn48']`, and `root['lastBtn49']` persist across formula ticks via SimHub's `root[]` object. |
+
+#### Verification
+
+If the screen does not switch:
+1. Open **SimHub → Available Properties**
+2. Press your button
+3. Search for `EasyScriptPropertys.TyreButton` — it should flip between `0` and `1`
+4. If it stays `0`, check that the EasyScript binding name matches exactly and that the `InputStatus.` prefix is used in the EasyScript JS code.
+
+---
+
+### 7.4 OLED Display — JavaScript Code
 
 The OLED display is driven by a JavaScript snippet in SimHub that runs at 60Hz. It assembles a `DISP|Line1|Line2|Line3|Line4\n` string and sends it to the Pico 2 over serial.
+
+The display now supports three screens:
+- **Default screen** — Original fuel, gap, pit, and status data
+- **Tyre screen** (LED2 button / vJoy B48) — Live wear % and temperature for all four corners
+- **Relative position screen** (LED3 button / vJoy B49) — Class-relative rivals with gaps
 
 #### Setup in SimHub
 
@@ -1164,6 +1242,10 @@ Paste this into the "Loop" or main JavaScript section:
   It auto-detects race type (laps vs timed) and class structure
   (single vs multiclass) to show relevant data without manual switching.
 
+  SCREEN SWITCHING (via EasyScript bridge):
+  - LED2 button (vJoy B48) toggles Default <-> Tyre screen
+  - LED3 button (vJoy B49) toggles Default <-> Relative Position screen
+
   KEY FEATURES:
   - Session-aware reset: pit counters and timers wipe when moving
     from Practice -> Qualifying -> Race.
@@ -1175,6 +1257,8 @@ Paste this into the "Loop" or main JavaScript section:
     lap count omitted from Line 1 in multiclass races.
   - Live tyre grip readout: Line 4 slot 1 shows effective grip %
     of the most worn corner, calculated from raw SimHub wear data.
+  - Tyre screen: all four corners with wear % and temperature.
+  - Relative screen: class rivals 2 ahead / player / 1 behind with gaps.
 
   LINE 1 — Position info / Gap snapshot:
     - 10s after crossing line: +[ahead] -[behind] (class-relative)
@@ -1197,11 +1281,20 @@ Paste this into the "Loop" or main JavaScript section:
     - Slot 1 (10-20s):  TYRE x% (live effective grip of most worn corner)
     - Slot 2 (20-30s):  Pit stop progress PIT[completed/total]
 
-  NOTE: LED rows are controlled separately in SimHub NCALC formulas.
+  NOTE: LED rows are controlled separately in SimHub formulas.
         Set all LED rows to "Changes only" to prevent animation spam.
         Tyre wear warnings have moved entirely to LED2 (green).
   ============================================================
 */
+
+// ============================================================
+//  SCREEN SWITCHING STATE (LED2 / LED3)
+// ============================================================
+// LED2 (vJoy B48) -> toggle default <-> tyre screen
+// LED3 (vJoy B49) -> toggle default <-> relative position screen
+if (root['screen'] === undefined) root['screen'] = 'default';
+if (root['lastBtn48'] === undefined) root['lastBtn48'] = false;
+if (root['lastBtn49'] === undefined) root['lastBtn49'] = false;
 
 // --- Helper: Convert SimHub TimeSpan objects, decimal strings, or numbers to seconds ---
 function toSeconds(v) {
@@ -1226,10 +1319,99 @@ function fmtPit(sec) {
     return format(m, '00') + ':' + format(s, '00') + '.' + format(ms, '000');
 }
 
+// --- Helper: Format gap for relative position screen ---
+// Rules: gap >= 1 lap -> +nL / -nL
+//        gap >= 100s  -> integer (no decimal)
+//        else         -> +xx.x / -xx.x
+function fmtRelGap(gapSec, lapTime) {
+    if (lapTime > 0 && Math.abs(gapSec) >= lapTime) {
+        var laps = Math.floor(Math.abs(gapSec) / lapTime);
+        return (gapSec >= 0 ? '+' : '-') + laps + 'L';
+    }
+    if (Math.abs(gapSec) >= 100) {
+        return (gapSec >= 0 ? '+' : '-') + Math.floor(Math.abs(gapSec));
+    }
+    var s = Math.abs(gapSec).toFixed(1);
+    return (gapSec >= 0 ? '+' : '-') + s;
+}
+
+// --- Helper: abbreviate surname (last word) to 3 uppercase chars ---
+function abbrevSurname(fullName) {
+    if (!fullName || typeof fullName !== 'string') return 'CAR';
+    var parts = fullName.trim().split(/\s+/);
+    if (parts.length > 1) {
+        return parts[parts.length - 1].substring(0, 3).toUpperCase();
+    } else if (parts.length === 1 && parts[0].length >= 3) {
+        return parts[0].substring(0, 3).toUpperCase();
+    }
+    return 'CAR';
+}
+
+// --- Helper: Find class rival at given offset ---
+// offset: -2 = 2nd class rival ahead, -1 = 1st ahead, +1 = 1st behind
+function getRival(offset) {
+    var pPos = parseInt($prop('DataCorePlugin.GameData.Position'));
+    var pClassRaw = $prop('DataCorePlugin.GameData.CarClass');
+    if (!pClassRaw || pClassRaw === '') return null;
+    var pClass = (typeof pClassRaw === 'string') ? pClassRaw.trim() : pClassRaw.toString().trim();
+
+    if (offset < 0) {
+        var target = Math.abs(offset);
+        var found = 0;
+        var cumGap = 0;
+        for (var i = pPos; i > 1; i--) {
+            var idx = i < 10 ? '0' + i : '' + i;
+            var iv = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.IntervalGap');
+            if (iv !== null && iv !== undefined && iv !== '') cumGap += toSeconds(iv);
+            var cPos = i - 1;
+            var cIdx = cPos < 10 ? '0' + cPos : '' + cPos;
+            var cClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + cIdx + '.CarClass');
+            var cClass = cClassRaw ? (typeof cClassRaw === 'string' ? cClassRaw.trim() : cClassRaw.toString().trim()) : '';
+            if (cClass === pClass) {
+                found++;
+                if (found === target) {
+                    var name = $prop('GarySwallowDataPlugin.Leaderboard.Position' + cIdx + '.DriverName');
+                    return { pos: cPos, name: abbrevSurname(name), gap: cumGap };
+                }
+            }
+        }
+    } else {
+        var cumGap = 0;
+        for (var i = pPos + 1; i <= 100; i++) {
+            var idx = i < 10 ? '0' + i : '' + i;
+            var iv = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.IntervalGap');
+            if (iv !== null && iv !== undefined && iv !== '') cumGap += toSeconds(iv);
+            var cClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+            var cClass = cClassRaw ? (typeof cClassRaw === 'string' ? cClassRaw.trim() : cClassRaw.toString().trim()) : '';
+            if (cClass === pClass) {
+                var name = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.DriverName');
+                return { pos: i, name: abbrevSurname(name), gap: cumGap };
+            }
+        }
+    }
+    return null;
+}
+
 // --- Timing anchors ---
 var now = Date.now();
 if (cycleStart === 0) cycleStart = now;
 var elapsed = now - cycleStart;
+
+// --- Button inputs (rising edge detection) ---
+var btn48 = $prop('EasyScriptPropertys.TyreButton');
+var btn49 = $prop('EasyScriptPropertys.RelativeButton');
+
+var btn48now = (btn48 === true || btn48 === 1 || btn48 === '1' || (typeof btn48 === 'number' && btn48 > 0));
+var btn49now = (btn49 === true || btn49 === 1 || btn49 === '1' || (typeof btn49 === 'number' && btn49 > 0));
+
+if (btn48now && !root['lastBtn48']) {
+    root['screen'] = (root['screen'] === 'tyre') ? 'default' : 'tyre';
+}
+if (btn49now && !root['lastBtn49']) {
+    root['screen'] = (root['screen'] === 'relative') ? 'default' : 'relative';
+}
+root['lastBtn48'] = btn48now;
+root['lastBtn49'] = btn49now;
 
 // --- Detect session change ---
 var sessionType = $prop('DataCorePlugin.GameData.SessionTypeName');
@@ -1267,11 +1449,18 @@ var tyreRL        = $prop('DataCorePlugin.GameData.TyreWearRearLeft');
 var tyreRR        = $prop('DataCorePlugin.GameData.TyreWearRearRight');
 var tankCapacity  = $prop('DataCorePlugin.GameData.CarSettings_MaxFUEL');
 
+// --- Tyre temperatures (for LED2 tyre screen) ---
+var tempFL = $prop('DataCorePlugin.GameData.TyreTemperatureFrontLeft');
+var tempFR = $prop('DataCorePlugin.GameData.TyreTemperatureFrontRight');
+var tempRL = $prop('DataCorePlugin.GameData.TyreTemperatureRearLeft');
+var tempRR = $prop('DataCorePlugin.GameData.TyreTemperatureRearRight');
+
 // --- Convert TimeSpan properties to usable numbers ---
 var stl = toSeconds(sessionTime);
 var llt = toSeconds(lastLapTime);
 var blt = toSeconds(bestLapTime);
 var lpd = toSeconds(lastPitStopDuration);
+var playerLapTime = llt > 0 ? llt : blt;
 
 // --- Helper: calculate total fuel needed ---
 function calcTotalFuelNeeded(playerLapTime) {
@@ -1286,7 +1475,6 @@ function calcTotalFuelNeeded(playerLapTime) {
 
 // --- Line crossing detection for BOX BOX, FUEL OKAY, and gap snapshot ---
 if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
-    var playerLapTime = llt > 0 ? llt : blt;
     var fuelNeededToFinish = calcTotalFuelNeeded(playerLapTime);
 
     // Penultimate lap detection
@@ -1320,7 +1508,8 @@ if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
     //  Sums intervals to find class-relative gaps in multiclass.
     // ============================================================
     var playerPos = parseInt(position);
-    var pClass = $prop('DataCorePlugin.GameData.CarClass');
+    var pClassRaw = $prop('DataCorePlugin.GameData.CarClass');
+    var pClass = (pClassRaw && typeof pClassRaw === 'string') ? pClassRaw.trim() : (pClassRaw ? pClassRaw.toString().trim() : '');
 
     var aheadGap = 0;
     var foundAhead = false;
@@ -1333,7 +1522,8 @@ if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
 
         var checkPos = i - 1;
         var checkIdx = checkPos < 10 ? '0' + checkPos : '' + checkPos;
-        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + checkIdx + '.CarClass');
+        var checkClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + checkIdx + '.CarClass');
+        var checkClass = checkClassRaw ? (typeof checkClassRaw === 'string' ? checkClassRaw.trim() : checkClassRaw.toString().trim()) : '';
         if (checkClass === pClass) {
             foundAhead = true;
             break;
@@ -1349,7 +1539,8 @@ if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
             behindGap += toSeconds(intervalRaw);
         }
 
-        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClass = checkClassRaw ? (typeof checkClassRaw === 'string' ? checkClassRaw.trim() : checkClassRaw.toString().trim()) : '';
         if (checkClass === pClass) {
             foundBehind = true;
             break;
@@ -1395,13 +1586,15 @@ lastCurrentLap = currentLap;
 // ============================================================
 //  LINE 1 — Gap snapshot / Position / Class Position / Lap
 // ============================================================
-var playerClass = $prop('DataCorePlugin.GameData.CarClass');
+var playerClassRaw = $prop('DataCorePlugin.GameData.CarClass');
+var playerClass = playerClassRaw ? (typeof playerClassRaw === 'string' ? playerClassRaw.trim() : playerClassRaw.toString().trim()) : '';
 var isMulticlass = false;
 
 if (playerClass && playerClass !== '') {
     for (var i = 1; i <= 30; i++) {
         var idx = i < 10 ? '0' + i : '' + i;
-        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClass = checkClassRaw ? (typeof checkClassRaw === 'string' ? checkClassRaw.trim() : checkClassRaw.toString().trim()) : '';
         if (checkClass && checkClass !== '' && checkClass !== playerClass) {
             isMulticlass = true;
             break;
@@ -1417,7 +1610,8 @@ if (now < gapTimer && gapDisplayStr !== '') {
     var maxCheck = Math.min(position, 70);
     for (var i = 1; i < maxCheck; i++) {
         var idx = i < 10 ? '0' + i : '' + i;
-        var checkClass = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClassRaw = $prop('GarySwallowDataPlugin.Leaderboard.Position' + idx + '.CarClass');
+        var checkClass = checkClassRaw ? (typeof checkClassRaw === 'string' ? checkClassRaw.trim() : checkClassRaw.toString().trim()) : '';
         if (checkClass === null || checkClass === undefined || checkClass === '') continue;
         if (checkClass === playerClass) classPos++;
     }
@@ -1429,7 +1623,6 @@ if (now < gapTimer && gapDisplayStr !== '') {
 // ============================================================
 //  TOTAL FUEL NEEDED TO FINISH
 // ============================================================
-var playerLapTime = llt > 0 ? llt : blt;
 var totalFuelNeeded = calcTotalFuelNeeded(playerLapTime);
 
 // ============================================================
@@ -1555,51 +1748,111 @@ if (fuelOkayActive) {
 }
 
 // ============================================================
-//  ASSEMBLE SERIAL STRING AND SEND TO PICO
+//  SCREEN ROUTER
 // ============================================================
-return 'DISP|' + line1 +
-       '|F' + format(fuel, '0.0') + ' ' + fuelLabel + fuelDisplay +
-       '|' + line3 +
-       '|' + line4 + '\n';
+if (root['screen'] === 'tyre') {
+    // --- TYRE SCREEN (LED2) ---
+    // 1 line per tyre: FL/FR/RL/RR + wear% + temp
+    // Compresses space when temp hits 3 digits to stay within 10 chars
+    function fmtTyreLine(label, wear, temp) {
+        var w = (wear !== null && wear !== undefined) ? Math.round(wear) : 0;
+        var t = (temp !== null && temp !== undefined) ? Math.round(temp) : 0;
+        var ws = (w >= 100) ? '100' : w.toString();
+        var line = label + ws + '%';
+        if (t >= 100) {
+            line += t.toString() + '\u00b0';
+        } else {
+            line += ' ' + t.toString() + '\u00b0';
+        }
+        return line;
+    }
+
+    var tLine1 = fmtTyreLine('FL', tyreFL, tempFL);
+    var tLine2 = fmtTyreLine('FR', tyreFR, tempFR);
+    var tLine3 = fmtTyreLine('RL', tyreRL, tempRL);
+    var tLine4 = fmtTyreLine('RR', tyreRR, tempRR);
+
+    return 'DISP|' + tLine1 + '|' + tLine2 + '|' + tLine3 + '|' + tLine4 + '\n';
+
+} else if (root['screen'] === 'relative') {
+    // --- RELATIVE POSITION SCREEN (LED3) ---
+    // Class-relative rivals. Layout: 2 ahead / player / 1 behind.
+    // Format: {pos}{3-letter-name}{+/-gap}
+    // Gap rules: >= 1 lap -> nL, >= 100s -> integer, else -> xx.x
+    var r2 = getRival(-2);
+    var r1 = getRival(-1);
+    var rB = getRival(1);
+
+    var playerName = $prop('DataCorePlugin.GameData.PlayerName');
+    var pName3 = abbrevSurname(playerName);
+
+    var rel1 = r2 ? r2.pos + r2.name + fmtRelGap(r2.gap, playerLapTime) : '---';
+    var rel2 = r1 ? r1.pos + r1.name + fmtRelGap(r1.gap, playerLapTime) : '---';
+    var rel3 = position + pName3;
+    var rel4 = rB ? rB.pos + rB.name + fmtRelGap(-rB.gap, playerLapTime) : '---';
+
+    return 'DISP|' + rel1 + '|' + rel2 + '|' + rel3 + '|' + rel4 + '\n';
+
+} else {
+    // --- DEFAULT SCREEN (all original logic preserved) ---
+    return 'DISP|' + line1 +
+           '|F' + format(fuel, '0.0') + ' ' + fuelLabel + fuelDisplay +
+           '|' + line3 +
+           '|' + line4 + '\n';
+}
 ```
 
 ---
 
-### 7.4 What the Display Shows
+### 7.5 What the Display Shows
 
-| Line | Content | Example |
-|------|---------|---------|
-| **Line 1** | **Gap snapshot** (10s after line crossing): class-relative time to car ahead and behind | `+1.5 -2.3` |
-| **Line 1** | **Multiclass fallback:** Position, Class Position | `P39 C5` |
-| **Line 1** | **Single-class fallback:** Position, Lap | `P39 L12` |
-| **Line 2** | Fuel amount + fuel to add OR total needed | `F12.5 E8` or `F12.5 T45` |
-| **Line 3** | Laps until pit needed / BOX BOX / FUEL OKAY | `Pit 4`, `BOX BOX`, `FUEL OKAY` |
-| **Line 4** | Status: pit timer, best lap, laps/time, tyre grip, pit stops | `BEST LAP`, `L12/25`, `TYRE 35%`, `PIT 1/2` |
+| Screen | Line | Content | Example |
+|--------|------|---------|---------|
+| **Default** | **Line 1** | **Gap snapshot** (10s after line crossing): class-relative time to car ahead and behind | `+1.5 -2.3` |
+| **Default** | **Line 1** | **Multiclass fallback:** Position, Class Position | `P39 C5` |
+| **Default** | **Line 1** | **Single-class fallback:** Position, Lap | `P39 L12` |
+| **Default** | **Line 2** | Fuel amount + fuel to add OR total needed | `F12.5 E8` or `F12.5 T45` |
+| **Default** | **Line 3** | Laps until pit needed / BOX BOX / FUEL OKAY | `Pit 4`, `BOX BOX`, `FUEL OKAY` |
+| **Default** | **Line 4** | Status: pit timer, best lap, laps/time, tyre grip, pit stops | `BEST LAP`, `L12/25`, `TYRE 35%`, `PIT 1/2` |
+| **Tyre** | **Line 1** | Front Left wear % and temperature | `FL87% 85°` |
+| **Tyre** | **Line 2** | Front Right wear % and temperature | `FR85% 87°` |
+| **Tyre** | **Line 3** | Rear Left wear % and temperature | `RL82% 90°` |
+| **Tyre** | **Line 4** | Rear Right wear % and temperature | `RR80% 88°` |
+| **Relative** | **Line 1** | 2nd class rival ahead | `12HAM+2.3` |
+| **Relative** | **Line 2** | 1st class rival ahead | `14VER+0.8` |
+| **Relative** | **Line 3** | Player position and name | `39YOU` |
+| **Relative** | **Line 4** | 1st class rival behind | `42NOR-1.5` |
 
-**Line 2 rotates every 10 seconds** between fuel-to-add (`E`) and total-fuel-needed (`T`).
+**Default Screen — Line 2 rotates every 10 seconds** between fuel-to-add (`E`) and total-fuel-needed (`T`).
 
-**Line 4 rotates every 10 seconds** across three slots:
+**Default Screen — Line 4 rotates every 10 seconds** across three slots:
 - **Slot 0:** Lap counter `L12/25` or time remaining `T23:45`
 - **Slot 1:** Live effective grip of the most worn tyre corner: `TYRE 35%` (calculated as `(rawWear - 50) * 2`, clamped to 0-100)
 - **Slot 2:** Pit stop progress `PIT 1/2`
 
-**Priority overrides on Line 4:** If you're in the pits, it shows the live pit timer. If you just finished a pit stop, it shows the duration for 4 seconds. If you set a best lap, it shows `BEST LAP` for 4 seconds. Only if none of these are active does it show the rotating 3-slot cycle.
+**Priority overrides on Default Line 4:** If you're in the pits, it shows the live pit timer. If you just finished a pit stop, it shows the duration for 4 seconds. If you set a best lap, it shows `BEST LAP` for 4 seconds. Only if none of these are active does it show the rotating 3-slot cycle.
 
 **Gap snapshot details:** When you cross the start/finish line, Line 1 freezes a 10-second readout of your class-relative gaps. It uses `IntervalGap` from the GarySwallowDataPlugin — the real-time gap from each car to the one immediately ahead. To find your class neighbors, the script sums the intervals between you and the nearest matching-class car in each direction. If the gap exceeds one lap length, it displays `+1L` or `-1L`. If you are first or last in class, it shows `+LEAD` or `-LAST`.
 
-**Tyre wear moved to LED2:** Tyre wear warnings no longer appear as temporary flashes on Line 4. Instead, the green LED (LED2) provides a graduated visual alert with five states from solid-on (early wear) through three breathing speeds to off (healthy tyres). The OLED still shows the live `TYRE x%` readout in Line 4's rotation for at-a-glance numbers.
+**Tyre screen details:** Each line shows the corner label, raw wear percentage, and live temperature. The layout compresses when temperature reaches 3 digits (e.g., `FL100%100°` vs `FL100% 99°`) to stay within the 10-character line budget.
+
+**Relative screen details:** Shows class-relative rivals in a "2 ahead / player / 1 behind" layout. Driver names are abbreviated to 3 uppercase characters from their surname (last word of the full name). Gaps follow the same rules as the default gap snapshot: lap gaps show as `nL`, gaps ≥ 100s show as integers, otherwise `xx.x` format.
+
+**Tyre wear moved to LED2:** Tyre wear warnings no longer appear as temporary flashes on Line 4. Instead, the green LED (LED2) provides a graduated visual alert with five states from solid-on (early wear) through three breathing speeds to off (healthy tyres). The OLED still shows the live `TYRE x%` readout in Line 4's rotation for at-a-glance numbers, and the dedicated Tyre screen provides full corner-by-corner detail.
 
 ---
 
-### 7.5 SimHub Settings Summary
+### 7.6 SimHub Settings Summary
 
 | Setting | Value |
 |---------|-------|
 | Serial baud rate | 115200 |
 | OLED refresh rate | 60Hz |
-| LED NCALC rows | Set to **Changes Only** |
+| LED formula rows | Set to **Changes Only** |
 | LED commands | `LED1_FADE_FLASH_100`, `LED1_OFF`, `LED1_ON`, etc. |
 | OLED command prefix | `DISP\|` |
+| EasyScript properties | `TyreButton`, `RelativeButton` |
+| EasyScript namespace | `EasyScriptPropertys` (note spelling) |
 
 ---
 
