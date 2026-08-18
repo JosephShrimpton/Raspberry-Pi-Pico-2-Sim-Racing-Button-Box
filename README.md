@@ -1036,11 +1036,6 @@ If any input doesn't register, check your wiring against the pin map and verify 
 
 ---
 
-User: WHY KEEP DOING THE SAME THING YOU ARE NOT PROVIDING A DOWNLOAD. JUST THE SAME DEAD LINK TO A SANDBOX. WHY. ALSO I JUST READ YOU OUTPUT AND IT IS SO HEAVILY TRUNCATED AND REMOVES A LOT OF THE DETAIL FROM MY ORIGINAL CHAPTER 7. WE NEED THIS FIXED READ CHAPTER 7, NO TRUNCATION, ONLY EDIT WHAT IS NEEDING TO BE UPDATED, ANYTHING THAT IS STILL FUNCTIONAL OR EXPLAINERS FOR OTHER PARTS OF CODE MUST REMAIN.
-Kimi: Here is the **complete updated Chapter 7** pasted directly. Copy it into your `.md` file.
-
----
-
 ## 7. SimHub Integration — LED & OLED Control
 
 SimHub is the bridge between your racing game and the button box. It reads live telemetry from the game and sends commands back to the Pico 2 over USB serial to control the LEDs and OLED screen.
@@ -1061,6 +1056,8 @@ SimHub uses **NCALC** or **JavaScript** formulas to decide when each LED should 
 > **Why "Changes Only" is mandatory:** The Arduino firmware handles LED flashing and fading internally. If SimHub sends the same `_FLASH_` command at 60Hz, the Arduino resets its animation timer every frame and the LED appears frozen or stuttering. "Changes Only" ensures the command is sent once when the state changes, then the Pico runs the animation smoothly by itself.
 
 Each LED is controlled by **exactly one formula row**. There are no overlapping conditions per LED, which prevents one trigger from "knocking out" another.
+
+> **Note:** These LED colour/flash formulas are entirely separate from the button-press screen switching covered in 7.3. The physical LED colour reacts to live telemetry (fuel level, tyre wear, flags) regardless of which OLED screen is currently displayed. Pressing the LED1–LED4 buttons only changes what the OLED shows — it does not affect the LED's own illumination logic below.
 
 #### LED1 — Red: Low Fuel Warning
 
@@ -1137,11 +1134,20 @@ Download and install the SimHub EasyScript plugin from RaceDepartment/OverTake.
 
 #### Step 2: Create Bridge Properties in EasyScript
 
-In EasyScript, create two **Properties** (not Events). Name them exactly:
+In EasyScript, create four **Properties** (not Events). Name them exactly:
+- `FuelButton` (for LED1 / vJoy B47)
 - `TyreButton` (for LED2 / vJoy B48)
 - `RelativeButton` (for LED3 / vJoy B49)
+- `PitPlanButton` (for LED4 / vJoy B50)
 
 **Important:** The `InputStatus.` prefix is required. Without it, the property returns `0` even when the button is pressed.
+
+**EasyScript Code for `FuelButton`**
+
+```javascript
+var b = $prop('InputStatus.JoystickPlugin.vJoy_Device_B47');
+return (b === true || b === 1 || b === '1' || (typeof b === 'number' && b > 0)) ? 1 : 0;
+```
 
 **EasyScript Code for `TyreButton`**
 
@@ -1157,6 +1163,13 @@ var b = $prop('InputStatus.JoystickPlugin.vJoy_Device_B49');
 return (b === true || b === 1 || b === '1' || (typeof b === 'number' && b > 0)) ? 1 : 0;
 ```
 
+**EasyScript Code for `PitPlanButton`**
+
+```javascript
+var b = $prop('InputStatus.JoystickPlugin.vJoy_Device_B50');
+return (b === true || b === 1 || b === '1' || (typeof b === 'number' && b > 0)) ? 1 : 0;
+```
+
 #### Step 3: Reference EasyScript Properties in Your Custom Serial JS
 
 In your **Custom Serial Device** JavaScript formula, replace direct JoystickPlugin reads with the EasyScript bridge properties.
@@ -1164,8 +1177,10 @@ In your **Custom Serial Device** JavaScript formula, replace direct JoystickPlug
 **The property path format is:**
 
 ```javascript
+$prop('EasyScriptPropertys.FuelButton')
 $prop('EasyScriptPropertys.TyreButton')
 $prop('EasyScriptPropertys.RelativeButton')
+$prop('EasyScriptPropertys.PitPlanButton')
 ```
 
 > **Critical:** Note the spelling — `EasyScriptPropertys` (not `Properties`). This is the exact namespace SimHub uses.
@@ -1177,15 +1192,15 @@ $prop('EasyScriptPropertys.RelativeButton')
 | **Why not read JoystickPlugin directly?** | SimHub's Custom Serial JS runs in an isolated scope. `JoystickPlugin.*` properties are visible in Available Properties but evaluate to `null` when queried from Custom Serial JS. |
 | **Why does EasyScript work?** | EasyScript runs in its own scope where JoystickPlugin properties *do* hydrate correctly. Its output properties are globally readable. |
 | **Why `InputStatus.` prefix?** | In some SimHub contexts, input properties require the `InputStatus.` prefix (e.g., `InputStatus.JoystickPlugin.vJoy_Device_B48`). Without it, EasyScript returns `0` even when the button is physically pressed. |
-| **Rising-edge detection** | Because the OLED refreshes at 60Hz, holding a button for 16ms would span multiple ticks. The `!root['lastBtn48']` check ensures the toggle only fires once per press. |
-| **Persistent state** | `root['screen']`, `root['lastBtn48']`, and `root['lastBtn49']` persist across formula ticks via SimHub's `root[]` object. |
+| **Rising-edge detection** | Because the OLED refreshes at 60Hz, holding a button for 16ms would span multiple ticks. The `!root['lastBtn48']` style check (used for all four buttons) ensures each toggle only fires once per press. |
+| **Persistent state** | `root['screen']`, `root['lastBtn47']`, `root['lastBtn48']`, `root['lastBtn49']`, and `root['lastBtn50']` persist across formula ticks via SimHub's `root[]` object. |
 
 #### Verification
 
-If the screen does not switch:
+If a screen does not switch:
 1. Open **SimHub → Available Properties**
-2. Press your button
-3. Search for `EasyScriptPropertys.TyreButton` — it should flip between `0` and `1`
+2. Press the corresponding button
+3. Search for the relevant `EasyScriptPropertys.*` property (e.g. `EasyScriptPropertys.FuelButton`) — it should flip between `0` and `1`
 4. If it stays `0`, check that the EasyScript binding name matches exactly and that the `InputStatus.` prefix is used in the EasyScript JS code.
 
 ---
@@ -1194,10 +1209,12 @@ If the screen does not switch:
 
 The OLED display is driven by a JavaScript snippet in SimHub that runs at 60Hz. It assembles a `DISP|Line1|Line2|Line3|Line4\n` string and sends it to the Pico 2 over serial.
 
-The display now supports three screens:
+The display now supports five screens:
 - **Default screen** — Original fuel, gap, pit, and status data
-- **Tyre screen** (LED2 button / vJoy B48) — Live wear % and temperature for all four corners
+- **Tyre screen** (LED2 button / vJoy B48) — Live wear % and temperature for all four corners, using effective grip (not raw wear)
 - **Relative position screen** (LED3 button / vJoy B49) — Class-relative rivals with gaps
+- **Fuel management screen** (LED1 button / vJoy B47) — Current fuel, laps remaining, consumption rate, and time until empty
+- **Pit stop plan screen** (LED4 button / vJoy B50) — Next four scheduled pit stops with fuel-to-add and a projected tyre-change flag for each
 
 #### Setup in SimHub
 
@@ -1223,78 +1240,31 @@ var fuelOkayActive = false;
 var lastSessionType = '';
 var gapTimer = 0;
 var gapDisplayStr = '';
+var stintWearStart = null;
+var stintLapStart = 0;
+var wearRatePerLap = 0;
+var stintResetPending = false;
 ```
+
+**New variables for this update:** `stintWearStart`, `stintLapStart`, `wearRatePerLap`, and `stintResetPending` track tyre wear across the current stint so the Pit Plan screen can project forward wear-per-lap. See the explanation under "Pit Plan screen details" in 7.5 for how these are used.
 
 #### Loop Code (Runs Every Frame)
 
 Paste this into the "Loop" or main JavaScript section:
 
 ```javascript
-/*
-  ============================================================
-  SIM RACING BUTTON BOX - DISPLAY CONTROLLER
-  ============================================================
-  Game: Automobilista 2 (AMS2) via SimHub
-  Hardware: Raspberry Pi Pico + 4-line OLED (128x64)
-
-  OVERVIEW:
-  This script drives a 4-line OLED display on a custom button box.
-  It auto-detects race type (laps vs timed) and class structure
-  (single vs multiclass) to show relevant data without manual switching.
-
-  SCREEN SWITCHING (via EasyScript bridge):
-  - LED2 button (vJoy B48) toggles Default <-> Tyre screen
-  - LED3 button (vJoy B49) toggles Default <-> Relative Position screen
-
-  KEY FEATURES:
-  - Session-aware reset: pit counters and timers wipe when moving
-    from Practice -> Qualifying -> Race.
-  - Simplified fuel calculation: timer/lap-based with a flat +1 lap
-    buffer for timed races.
-  - Real-time gap snapshot: on every lap crossing, Line 1 shows a
-    10-second freeze of class-relative gaps using IntervalGap data.
-  - Multiclass support: class position, class-relative gaps, and
-    lap count omitted from Line 1 in multiclass races.
-  - Live tyre grip readout: Line 4 slot 1 shows effective grip %
-    of the most worn corner, calculated from raw SimHub wear data.
-  - Tyre screen: all four corners with wear % and temperature.
-  - Relative screen: class rivals 2 ahead / player / 1 behind with gaps.
-
-  LINE 1 — Position info / Gap snapshot:
-    - 10s after crossing line: +[ahead] -[behind] (class-relative)
-    - Multiclass: P[Position] C[ClassPos]
-    - Single-class: P[Position] L[Lap]
-
-  LINE 2 — Fuel info (rotates every 10 seconds):
-    - Slot 0 (0-10s):  F[Fuel] E[Litres to add at next pit stop]
-    - Slot 1 (10-20s): F[Fuel] T[Total litres needed to finish race]
-
-  LINE 3 — Pit window / BOX BOX / FUEL OKAY:
-    - Default:         Pit [laps remaining before fuel runs out]
-    - BOX BOX:         Triggered when fuel < 2 laps at line crossing
-    - FUEL OKAY:       Triggered at penultimate lap if fuel sufficient
-
-  LINE 4 — Status / overrides (rotates every 10 seconds):
-    - Priority overrides: live pit timer, frozen pit exit time,
-      BEST LAP (4s flash).
-    - Slot 0 (0-10s):   Lap counter L[current/total] OR time remaining T[mm:ss]
-    - Slot 1 (10-20s):  TYRE x% (live effective grip of most worn corner)
-    - Slot 2 (20-30s):  Pit stop progress PIT[completed/total]
-
-  NOTE: LED rows are controlled separately in SimHub formulas.
-        Set all LED rows to "Changes only" to prevent animation spam.
-        Tyre wear warnings have moved entirely to LED2 (green).
-  ============================================================
-*/
-
 // ============================================================
-//  SCREEN SWITCHING STATE (LED2 / LED3)
+//  SCREEN SWITCHING STATE (LED1 / LED2 / LED3 / LED4)
 // ============================================================
+// LED1 (vJoy B47) -> toggle default <-> fuel management screen
 // LED2 (vJoy B48) -> toggle default <-> tyre screen
 // LED3 (vJoy B49) -> toggle default <-> relative position screen
+// LED4 (vJoy B50) -> toggle default <-> pit stop plan screen
 if (root['screen'] === undefined) root['screen'] = 'default';
 if (root['lastBtn48'] === undefined) root['lastBtn48'] = false;
 if (root['lastBtn49'] === undefined) root['lastBtn49'] = false;
+if (root['lastBtn47'] === undefined) root['lastBtn47'] = false;
+if (root['lastBtn50'] === undefined) root['lastBtn50'] = false;
 
 // --- Helper: Convert SimHub TimeSpan objects, decimal strings, or numbers to seconds ---
 function toSeconds(v) {
@@ -1413,6 +1383,23 @@ if (btn49now && !root['lastBtn49']) {
 root['lastBtn48'] = btn48now;
 root['lastBtn49'] = btn49now;
 
+// LED1 (vJoy B47) -> toggle default <-> fuel management screen
+// LED4 (vJoy B50) -> toggle default <-> pit stop plan screen
+var btn47 = $prop('EasyScriptPropertys.FuelButton');
+var btn50 = $prop('EasyScriptPropertys.PitPlanButton');
+
+var btn47now = (btn47 === true || btn47 === 1 || btn47 === '1' || (typeof btn47 === 'number' && btn47 > 0));
+var btn50now = (btn50 === true || btn50 === 1 || btn50 === '1' || (typeof btn50 === 'number' && btn50 > 0));
+
+if (btn47now && !root['lastBtn47']) {
+    root['screen'] = (root['screen'] === 'fuel') ? 'default' : 'fuel';
+}
+if (btn50now && !root['lastBtn50']) {
+    root['screen'] = (root['screen'] === 'pitplan') ? 'default' : 'pitplan';
+}
+root['lastBtn47'] = btn47now;
+root['lastBtn50'] = btn50now;
+
 // --- Detect session change ---
 var sessionType = $prop('DataCorePlugin.GameData.SessionTypeName');
 
@@ -1428,6 +1415,10 @@ if (sessionType && sessionType !== '' && sessionType !== lastSessionType) {
     gapTimer = 0;
     gapDisplayStr = '';
     lastPitDur = $prop('DataCorePlugin.GameData.LastPitStopDuration');
+    stintWearStart = null;
+    stintLapStart = 0;
+    wearRatePerLap = 0;
+    stintResetPending = false;
 }
 lastSessionType = sessionType;
 
@@ -1454,6 +1445,23 @@ var tempFL = $prop('DataCorePlugin.GameData.TyreTemperatureFrontLeft');
 var tempFR = $prop('DataCorePlugin.GameData.TyreTemperatureFrontRight');
 var tempRL = $prop('DataCorePlugin.GameData.TyreTemperatureRearLeft');
 var tempRR = $prop('DataCorePlugin.GameData.TyreTemperatureRearRight');
+
+// ============================================================
+//  TYRE STINT WEAR-RATE TRACKING (for Pit Plan screen, LED4)
+//  Tracks raw wear loss per lap over the current stint so the
+//  Pit Plan screen can project forward. Resets when a tyre
+//  change is detected (wear value jumps back up).
+// ============================================================
+var rawMinWearNow = Math.min(tyreFL, tyreFR, tyreRL, tyreRR);
+if (stintWearStart === null) {
+    stintWearStart = rawMinWearNow;
+    stintLapStart = currentLap;
+} else if (rawMinWearNow > stintWearStart + 5 && !stintResetPending) {
+    // Tyre change detected (wear increased). Don't reset the baseline yet -
+    // we're mid-lap (partial out-lap). Defer the reset until the next full
+    // lap crossing so the first tracked lap on new tyres is a genuine full lap.
+    stintResetPending = true;
+}
 
 // --- Convert TimeSpan properties to usable numbers ---
 var stl = toSeconds(sessionTime);
@@ -1573,6 +1581,21 @@ if (currentLap > lastCurrentLap && lastCurrentLap > 0) {
 
     gapDisplayStr = aheadStr + ' ' + behindStr;
     gapTimer = now + 10000;
+
+    // --- Update rolling tyre wear-rate estimate (raw wear points lost per lap) ---
+    if (stintResetPending) {
+        // This lap crossing is the first full lap boundary since the tyre
+        // change - anchor the new stint baseline here instead of computing
+        // a rate (that would include the partial out-lap).
+        stintWearStart = rawMinWearNow;
+        stintLapStart = currentLap;
+        stintResetPending = false;
+    } else {
+        var lapsIntoStint = currentLap - stintLapStart;
+        if (lapsIntoStint > 0) {
+            wearRatePerLap = Math.max(0, (stintWearStart - rawMinWearNow) / lapsIntoStint);
+        }
+    }
 }
 
 // Session reset: lap counter went backwards
@@ -1755,7 +1778,8 @@ if (root['screen'] === 'tyre') {
     // 1 line per tyre: FL/FR/RL/RR + wear% + temp
     // Compresses space when temp hits 3 digits to stay within 10 chars
     function fmtTyreLine(label, wear, temp) {
-        var w = (wear !== null && wear !== undefined) ? Math.round(wear) : 0;
+        var rawW = (wear !== null && wear !== undefined) ? wear : 0;
+        var w = Math.max(0, Math.round((rawW - 50) * 2));
         var t = (temp !== null && temp !== undefined) ? Math.round(temp) : 0;
         var ws = (w >= 100) ? '100' : w.toString();
         var line = label + ws + '%';
@@ -1793,6 +1817,88 @@ if (root['screen'] === 'tyre') {
 
     return 'DISP|' + rel1 + '|' + rel2 + '|' + rel3 + '|' + rel4 + '\n';
 
+} else if (root['screen'] === 'fuel') {
+    // --- FUEL MANAGEMENT SCREEN (LED1) ---
+    // Line 1: current fuel / tank capacity
+    // Line 2: laps remaining at current fuel level
+    // Line 3: fuel consumption per lap
+    // Line 4: estimated time until fuel runs out
+    var lapsRemainingFuel = (fuelPerLap > 0 && isFinite(fuelPerLap) && isFinite(fuel)) ? Math.floor(fuel / fuelPerLap) : 0;
+    var fuelTimeRemaining = (playerLapTime > 0 && lapsRemainingFuel > 0) ? lapsRemainingFuel * playerLapTime : 0;
+
+    var fLine1 = 'F' + format(fuel, '0.0') + '/' + ((tankCapacity > 0 && isFinite(tankCapacity)) ? Math.round(tankCapacity) : '--');
+    var fLine2 = lapsRemainingFuel + ' LAPS';
+    var fLine3 = ((fuelPerLap > 0 && isFinite(fuelPerLap)) ? format(fuelPerLap, '0.0') : '0.0') + ' L/LAP';
+
+    var fLine4 = 'T--:--';
+    if (fuelTimeRemaining > 0) {
+        if (fuelTimeRemaining >= 3600) {
+            var fHrs = Math.floor(fuelTimeRemaining / 3600);
+            var fMins = Math.floor((fuelTimeRemaining % 3600) / 60);
+            var fSecs = Math.floor(fuelTimeRemaining % 60);
+            fLine4 = 'T' + fHrs + ':' + format(fMins, '00') + ':' + format(fSecs, '00');
+        } else {
+            var fMins = Math.floor(fuelTimeRemaining / 60);
+            var fSecs = Math.floor(fuelTimeRemaining % 60);
+            fLine4 = 'T' + fMins + ':' + format(fSecs, '00');
+        }
+    }
+
+    return 'DISP|' + fLine1 + '|' + fLine2 + '|' + fLine3 + '|' + fLine4 + '\n';
+
+} else if (root['screen'] === 'pitplan') {
+    // --- PIT STOP PLAN SCREEN (LED4) ---
+    // Shows up to the next 4 scheduled pit stops: fuel to add + tyre change flag.
+    // Format per line: P[stop number] [litres to add] T [Y/N]
+    // Tyre flag: simulates wear through the stint following each stop using the
+    // rolling wear-rate estimate. If projected effective wear (the same
+    // (raw-50)*2 scale used elsewhere) would drop below 60% before the next
+    // stop, flags a tyre change (T Y) at this stop and resets wear to fresh
+    // for the next projection. Otherwise flags T N and carries wear forward.
+    var planLines = ['---', '---', '---', '---'];
+
+    if (tankCapacity > 0 && isFinite(tankCapacity) && fuelPerLap > 0 && isFinite(fuelPerLap) && totalFuelNeeded > 0 && isFinite(totalFuelNeeded)) {
+        var fuelRemainingToFinish = Math.max(0, totalFuelNeeded - fuel);
+        var numStops = Math.ceil(fuelRemainingToFinish / tankCapacity);
+
+        if (numStops <= 0) {
+            planLines[0] = 'NO STOPS';
+            planLines[1] = 'NEEDED';
+        } else {
+            var simWear = Math.min(tyreFL, tyreFR, tyreRL, tyreRR);
+            var stopsToShow = Math.min(numStops, 4);
+
+            for (var k = 1; k <= stopsToShow; k++) {
+                var planFuelAdd;
+                if (k < numStops) {
+                    planFuelAdd = tankCapacity;
+                } else {
+                    planFuelAdd = fuelRemainingToFinish - (tankCapacity * (numStops - 1));
+                }
+                planFuelAdd = Math.max(0, Math.round(planFuelAdd));
+
+                var stintLaps = (wearRatePerLap > 0) ? Math.ceil(planFuelAdd / fuelPerLap) : 0;
+                var projectedRawWear = simWear - (wearRatePerLap * stintLaps);
+                var projectedEffective = Math.max(0, (projectedRawWear - 50) * 2);
+
+                var needsTyreChange = (wearRatePerLap > 0 && projectedEffective < 60);
+
+                var stopNum = pitsCompleted + k;
+                planLines[k - 1] = 'P' + stopNum + ' ' + planFuelAdd + ' T ' + (needsTyreChange ? 'Y' : 'N');
+
+                if (needsTyreChange) {
+                    simWear = 100;
+                } else {
+                    simWear = Math.max(0, projectedRawWear);
+                }
+            }
+        }
+    } else {
+        planLines[0] = 'CALCULATING';
+    }
+
+    return 'DISP|' + planLines[0] + '|' + planLines[1] + '|' + planLines[2] + '|' + planLines[3] + '\n';
+
 } else {
     // --- DEFAULT SCREEN (all original logic preserved) ---
     return 'DISP|' + line1 +
@@ -1814,14 +1920,22 @@ if (root['screen'] === 'tyre') {
 | **Default** | **Line 2** | Fuel amount + fuel to add OR total needed | `F12.5 E8` or `F12.5 T45` |
 | **Default** | **Line 3** | Laps until pit needed / BOX BOX / FUEL OKAY | `Pit 4`, `BOX BOX`, `FUEL OKAY` |
 | **Default** | **Line 4** | Status: pit timer, best lap, laps/time, tyre grip, pit stops | `BEST LAP`, `L12/25`, `TYRE 35%`, `PIT 1/2` |
-| **Tyre** | **Line 1** | Front Left wear % and temperature | `FL87% 85°` |
-| **Tyre** | **Line 2** | Front Right wear % and temperature | `FR85% 87°` |
-| **Tyre** | **Line 3** | Rear Left wear % and temperature | `RL82% 90°` |
-| **Tyre** | **Line 4** | Rear Right wear % and temperature | `RR80% 88°` |
+| **Tyre** | **Line 1** | Front Left effective grip % and temperature | `FL87% 85°` |
+| **Tyre** | **Line 2** | Front Right effective grip % and temperature | `FR85% 87°` |
+| **Tyre** | **Line 3** | Rear Left effective grip % and temperature | `RL82% 90°` |
+| **Tyre** | **Line 4** | Rear Right effective grip % and temperature | `RR80% 88°` |
 | **Relative** | **Line 1** | 2nd class rival ahead | `12HAM+2.3` |
 | **Relative** | **Line 2** | 1st class rival ahead | `14VER+0.8` |
 | **Relative** | **Line 3** | Player position and name | `39YOU` |
 | **Relative** | **Line 4** | 1st class rival behind | `42NOR-1.5` |
+| **Fuel** | **Line 1** | Current fuel / tank capacity | `F12.5/80` |
+| **Fuel** | **Line 2** | Laps remaining at current fuel level | `4 LAPS` |
+| **Fuel** | **Line 3** | Fuel consumption per lap | `3.2 L/LAP` |
+| **Fuel** | **Line 4** | Estimated time until fuel runs out | `T12:45` |
+| **Pit Plan** | **Line 1** | Next scheduled stop: number, fuel to add, tyre change flag | `P1 100 T N` |
+| **Pit Plan** | **Line 2** | 2nd upcoming stop | `P2 100 T Y` |
+| **Pit Plan** | **Line 3** | 3rd upcoming stop | `P3 100 T N` |
+| **Pit Plan** | **Line 4** | 4th upcoming stop | `P4 20 T N` |
 
 **Default Screen — Line 2 rotates every 10 seconds** between fuel-to-add (`E`) and total-fuel-needed (`T`).
 
@@ -1834,9 +1948,19 @@ if (root['screen'] === 'tyre') {
 
 **Gap snapshot details:** When you cross the start/finish line, Line 1 freezes a 10-second readout of your class-relative gaps. It uses `IntervalGap` from the GarySwallowDataPlugin — the real-time gap from each car to the one immediately ahead. To find your class neighbors, the script sums the intervals between you and the nearest matching-class car in each direction. If the gap exceeds one lap length, it displays `+1L` or `-1L`. If you are first or last in class, it shows `+LEAD` or `-LAST`.
 
-**Tyre screen details:** Each line shows the corner label, raw wear percentage, and live temperature. The layout compresses when temperature reaches 3 digits (e.g., `FL100%100°` vs `FL100% 99°`) to stay within the 10-character line budget.
+**Tyre screen details:** Each line shows the corner label, effective grip percentage, and live temperature. Effective grip is calculated the same way as everywhere else in the script: `(rawWear - 50) * 2`, clamped to 0–100 — since a car's usable grip range runs from 100 (new tyre) down to 50 (no grip left), not down to 0. The layout compresses when temperature reaches 3 digits (e.g., `FL100%100°` vs `FL100% 99°`) to stay within the 10-character line budget.
 
 **Relative screen details:** Shows class-relative rivals in a "2 ahead / player / 1 behind" layout. Driver names are abbreviated to 3 uppercase characters from their surname (last word of the full name). Gaps follow the same rules as the default gap snapshot: lap gaps show as `nL`, gaps ≥ 100s show as integers, otherwise `xx.x` format.
+
+**Fuel screen details:** A dedicated read-out for precise fuel strategy. Line 1 shows current fuel against tank capacity. Line 2 shows laps remaining at the current fuel level, floored to a whole number. Line 3 shows fuel consumption per lap. Line 4 shows the estimated time remaining before the tank runs dry, calculated as laps remaining × current lap time, formatted `mm:ss` (or `h:mm:ss` past one hour). If fuel or lap time data isn't available yet, Line 4 shows `T--:--` rather than a misleading number.
+
+**Pit Plan screen details:** Shows up to the next four scheduled pit stops using the same `pitsCompleted`/fuel-remaining logic as the Default screen's `PIT x/y` readout, so stop numbering stays consistent and rolls forward as stops are completed. Each line follows the format `P[stop number] [litres to add] T [Y/N]`:
+
+- **Fuel amount:** Every stop before the last one refuels to full tank capacity. The final stop only takes on the remaining litres needed to finish the race — so a 4-stop race with 3 full tanks and a small remainder shows `P1 100`, `P2 100`, `P3 100`, `P4 20`.
+- **Tyre change flag:** Driven by a rolling wear-rate estimate (`wearRatePerLap`), sampled at each lap crossing as raw wear points lost per lap. The script simulates forward, stop by stop: for each stop, it projects what effective grip would be at the *end* of the stint following that stop (i.e., by the time you reach the *next* stop) if you don't change tyres now. If that projected effective grip would drop below 60%, the line shows `T Y` and the simulation resets to fresh tyres (100) for the next stop's projection. If grip stays above 60%, it shows `T N` and the existing tyre wear carries forward into the next stint's projection. This lets one stop's decision cascade into the next — e.g. `P1 N, P2 Y, P3 N, P4 Y` reflects tyres changed at P2 comfortably lasting through P3, then needing a change again at P4.
+- **Partial-lap protection:** When a tyre change is detected (wear value jumps back up after a pit stop), the script does **not** reset the wear-rate baseline immediately — that would happen mid-lap, on a partial out-lap, and understate the true wear rate. Instead it sets `stintResetPending = true` and defers the reset until the *next* full lap crossing, so the first lap counted on new tyres is always a genuine complete lap, not a partial one.
+- **Estimate accuracy:** This is a linear projection based on a rolling average — it assumes wear-per-lap stays roughly constant for the rest of a stint. It doesn't yet distinguish between tyre compounds (soft/medium/hard use one shared rolling average) and needs a lap or two after each tyre change before the estimate is reliable. Treat `T Y/N` as a strong planning aid, not an exact guarantee — cross-check against the live Tyre screen (LED2) as you approach a projected stop.
+- **No stops needed:** If the fuel remaining for the race fits within the current tank, Line 1 shows `NO STOPS` / Line 2 shows `NEEDED` and the remaining lines are blank.
 
 **Tyre wear moved to LED2:** Tyre wear warnings no longer appear as temporary flashes on Line 4. Instead, the green LED (LED2) provides a graduated visual alert with five states from solid-on (early wear) through three breathing speeds to off (healthy tyres). The OLED still shows the live `TYRE x%` readout in Line 4's rotation for at-a-glance numbers, and the dedicated Tyre screen provides full corner-by-corner detail.
 
@@ -1851,7 +1975,7 @@ if (root['screen'] === 'tyre') {
 | LED formula rows | Set to **Changes Only** |
 | LED commands | `LED1_FADE_FLASH_100`, `LED1_OFF`, `LED1_ON`, etc. |
 | OLED command prefix | `DISP\|` |
-| EasyScript properties | `TyreButton`, `RelativeButton` |
+| EasyScript properties | `FuelButton`, `TyreButton`, `RelativeButton`, `PitPlanButton` |
 | EasyScript namespace | `EasyScriptPropertys` (note spelling) |
 
 ---
